@@ -111,7 +111,7 @@ public class FlinkTemperatureJob {
                 e.printStackTrace();
             }
 
-            out.collect(line); // <-- important!
+            out.collect(line);
         }
     }
 
