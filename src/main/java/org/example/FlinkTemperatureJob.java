@@ -9,6 +9,7 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -43,9 +44,18 @@ public class FlinkTemperatureJob {
                                 .withTimestampAssigner((event, timestamp) -> event.time)
                 );
 
+        // Global average
         sensorData
                 .windowAll(TumblingEventTimeWindows.of(Time.minutes(1)))
-                .aggregate(new AverageTempAggregator(), new PrintGlobalAverage());
+                .aggregate(new AverageTempAggregator(), new PrintGlobalAverage())
+                .print();
+
+        // Per-sensor average
+        sensorData
+                .keyBy(sensor -> sensor.id)
+                .window(TumblingEventTimeWindows.of(Time.minutes(1)))
+                .aggregate(new AverageTempAggregator(), new PrintPerSensorAverage())
+                .print();
 
         env.execute("Flink Global Temperature Averaging Job");
     }
@@ -83,13 +93,34 @@ public class FlinkTemperatureJob {
         }
     }
 
+
+    public static class PrintPerSensorAverage extends ProcessWindowFunction<Double, String, String, TimeWindow> {
+        @Override
+        public void process(String key, Context context, Iterable<Double> input, Collector<String> out) {
+            long windowStart = context.window().getStart();
+            double average = input.iterator().next();
+
+            String line = String.format(
+                    "Timestamp: %d, Device: %s, Average Temperature: %.1f C",
+                    windowStart, key, average
+            );
+
+            try (FileWriter writer = new FileWriter("/Users/ericmovchan/IdeaProjects/untitled/data/individual_avg.log", true)) {
+                writer.write(line + "\n");
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            out.collect(line); // <-- important!
+        }
+    }
+
     public static class PrintGlobalAverage extends ProcessAllWindowFunction<Double, Void, TimeWindow> {
         @Override
         public void process(Context context, Iterable<Double> input, Collector<Void> out) {
             long windowStart = context.window().getStart();
             double average = input.iterator().next();
-//            System.out.printf("Timestamp: %d, Global Average Temperature: %.1f C%n", windowStart, average);
-//            FileWriter fw = new FileWriter("/Users/ericmovchan/IdeaProjects/untitled/data/global_avg.log", true)
+
             try (FileWriter fw = new FileWriter("/Users/ericmovchan/IdeaProjects/untitled/data/global_avg.log", true)) {
                 fw.write(String.format("Timestamp: %d, Global Average Temperature: %.1f C%n", windowStart, average));
             } catch (IOException e) {
@@ -97,4 +128,5 @@ public class FlinkTemperatureJob {
             }
         }
     }
+
 }
