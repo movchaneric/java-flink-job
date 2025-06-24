@@ -65,6 +65,7 @@ public class FlinkTemperatureJob {
                 .aggregate(new AverageTempAggregator(), new PrintPerSensorAverage())
                 .print();
 
+        // Anomaly test
         MapStateDescriptor<String, Tuple3<Long, Double, Double>> statsDescriptor =
                 new MapStateDescriptor<>(
                         "stats",
