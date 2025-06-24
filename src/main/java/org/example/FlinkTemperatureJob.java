@@ -3,10 +3,14 @@ package org.example;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.eventtime.*;
 import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.io.TextInputFormat;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
@@ -16,8 +20,12 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.util.Collector;
 import org.example.models.Sensor;
 
+
+
 import java.io.FileWriter;
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
 
 public class FlinkTemperatureJob {
 
@@ -57,12 +65,34 @@ public class FlinkTemperatureJob {
                 .aggregate(new AverageTempAggregator(), new PrintPerSensorAverage())
                 .print();
 
+        MapStateDescriptor<String, Tuple3<Long, Double, Double>> statsDescriptor =
+                new MapStateDescriptor<>(
+                        "stats",
+                        Types.STRING,
+                        Types.TUPLE(Types.LONG, Types.DOUBLE, Types.DOUBLE)
+                );
+
+        DataStream<Tuple3<Long, Double, Double>> globalStats = sensorData
+                .windowAll(TumblingEventTimeWindows.of(Time.minutes(1)))
+                .aggregate(new StatsAggregator());
+
+        sensorData
+                .connect(globalStats.broadcast(statsDescriptor))
+                .process(new AnomalyDetector(statsDescriptor));
+
+
         env.execute("Flink Global Temperature Averaging Job");
     }
 
     // Custom accumulator
     public static class TempAccumulator {
         double sum = 0;
+        long count = 0;
+    }
+
+    public static class StatsAccumulator {
+        double sum = 0;
+        double sumSquares = 0;
         long count = 0;
     }
 
@@ -92,7 +122,6 @@ public class FlinkTemperatureJob {
             return a;
         }
     }
-
 
     public static class PrintPerSensorAverage extends ProcessWindowFunction<Double, String, String, TimeWindow> {
         @Override
@@ -126,6 +155,81 @@ public class FlinkTemperatureJob {
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+    }
+
+    public static class StatsAggregator implements AggregateFunction<Sensor, StatsAccumulator, Tuple3<Long, Double, Double>> {
+        @Override
+        public StatsAccumulator createAccumulator() {
+            return new StatsAccumulator();
+        }
+
+        @Override
+        public StatsAccumulator add(Sensor value, StatsAccumulator acc) {
+            acc.sum += value.temperature;
+            acc.sumSquares += value.temperature * value.temperature;
+            acc.count++;
+            return acc;
+        }
+
+        @Override
+        public Tuple3<Long, Double, Double> getResult(StatsAccumulator acc) {
+            double mean = acc.sum / acc.count;
+            double variance = (acc.sumSquares / acc.count) - (mean * mean);
+            double stdDev = Math.sqrt(variance);
+            return Tuple3.of(acc.count, mean, stdDev);
+        }
+
+        @Override
+        public StatsAccumulator merge(StatsAccumulator a, StatsAccumulator b) {
+            a.sum += b.sum;
+            a.sumSquares += b.sumSquares;
+            a.count += b.count;
+            return a;
+        }
+    }
+
+    public static class AnomalyDetector extends BroadcastProcessFunction<Sensor, Tuple3<Long, Double, Double>, Void> {
+
+        private final MapStateDescriptor<String, Tuple3<Long, Double, Double>> descriptor;
+
+        public AnomalyDetector(MapStateDescriptor<String, Tuple3<Long, Double, Double>> descriptor) {
+            this.descriptor = descriptor;
+        }
+
+        private final Set<String> reportedAnomalies = new HashSet<>();
+
+        @Override
+        public void processElement(Sensor sensor, ReadOnlyContext ctx, Collector<Void> out) throws Exception {
+            Tuple3<Long, Double, Double> stats = ctx.getBroadcastState(descriptor).get("globalStats");
+
+            if (stats != null) {
+                double mean = stats.f1;
+                double std = stats.f2;
+
+                if (Math.abs(sensor.temperature - mean) > 3 * std) {
+                    // Unique anomaly key
+                    String key = sensor.id + "_" + sensor.time;
+
+                    if (!reportedAnomalies.contains(key)) {
+                        reportedAnomalies.add(key);
+
+                        String log = String.format(
+                                "Anomaly Detected! Timestamp: %d, Device: %s,%nAnomalous Temperature: %.1f C (Minute Avg: %.1f C, StdDev: %.1f)%n",
+                                sensor.time, sensor.id, sensor.temperature, mean, std);
+
+                        try (FileWriter fw = new FileWriter("/Users/ericmovchan/IdeaProjects/untitled/data/anomaly.log", true)) {
+                            fw.write(log);
+                        }
+                    }
+                }
+            }
+        }
+
+
+        @Override
+        public void processBroadcastElement(Tuple3<Long, Double, Double> stats, Context ctx, Collector<Void> out) throws Exception {
+            ctx.getBroadcastState(descriptor).put("globalStats", stats);
         }
     }
 

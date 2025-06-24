@@ -38,7 +38,8 @@ public class Main {
         while (true) {
             long now = Instant.now().toEpochMilli();
             for (int i = 0; i < numDevices; i++) {
-                double temperature = 10 + random.nextDouble() * 40; // Range: 10°C to 50°C
+                double temperature = 10 + random.nextDouble() * 40; // Range: 10C to 50C
+
                 Sensor sensor = new Sensor("0x" + Integer.toHexString(i), now, temperature);
                 writer.write(mapper.writeValueAsString(sensor) + "\n");
             }
